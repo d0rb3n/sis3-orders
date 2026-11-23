@@ -1,0 +1,137 @@
+name: deploy
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  id-token: write   # required for OIDC
+  contents: read
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: eu-north-1
+  AWS_PAGER: ""
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production   # sub becomes ...:environment:production
+    steps:
+      - uses: actions/checkout@v4
+
+      # ---- quality gates: run BEFORE any AWS credentials are requested ----
+      - name: Unit tests
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install -r app/requirements.txt
+          .venv/bin/python -m unittest discover -s tests -v
+
+      - name: Lint CloudFormation templates
+        run: |
+          .venv/bin/pip install cfn-lint
+          .venv/bin/cfn-lint --ignore-checks W3002 infra/*.yaml
+
+      # ---- OIDC: no stored access keys ----
+      - uses: aws-actions/configure-aws-credentials@v6   # pin to a SHA in real projects
+        with:
+          role-to-assume: ${{ vars.DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Set variables
+        run: |
+          echo "PREFIX=${{ vars.STACK_PREFIX }}" >> "$GITHUB_ENV"
+          echo "APP_ENV=${{ vars.APP_ENV }}" >> "$GITHUB_ENV"
+          echo "IMAGE_TAG=${GITHUB_SHA}" >> "$GITHUB_ENV"
+
+      - name: Artifacts bucket and ECR
+        run: |
+          aws cloudformation deploy --no-fail-on-empty-changeset \
+            --template-file infra/artifacts.yaml --stack-name "${PREFIX}-artifacts"
+          aws cloudformation deploy --no-fail-on-empty-changeset \
+            --template-file infra/ecr.yaml --stack-name "${PREFIX}-ecr" \
+            --parameter-overrides Environment="$APP_ENV"
+
+      - name: Read stack outputs
+        run: |
+          out() { aws cloudformation describe-stacks --stack-name "$1" \
+            --query "Stacks[0].Outputs[?OutputKey=='$2'].OutputValue | [0]" --output text; }
+          echo "ARTIFACT_BUCKET=$(out ${PREFIX}-artifacts BucketName)" >> "$GITHUB_ENV"
+          echo "REPO_NAME=$(out ${PREFIX}-ecr RepositoryName)" >> "$GITHUB_ENV"
+          echo "REPO_URI=$(out ${PREFIX}-ecr RepositoryUri)" >> "$GITHUB_ENV"
+          echo "REPO_ARN=$(out ${PREFIX}-ecr RepositoryArn)" >> "$GITHUB_ENV"
+
+      - name: Build and push image tagged with the commit SHA
+        run: |
+          EXISTING=$(aws ecr list-images --repository-name "$REPO_NAME" \
+            --filter tagStatus=TAGGED \
+            --query "imageIds[?imageTag=='${IMAGE_TAG}'].imageTag" --output text)
+          if [ -n "$EXISTING" ]; then
+            echo "Image ${IMAGE_TAG} already exists (tags are immutable); reusing it."
+            exit 0
+          fi
+          aws ecr get-login-password | docker login -u AWS --password-stdin "${REPO_URI%%/*}"
+          docker build --platform linux/amd64 -t "${REPO_URI}:${IMAGE_TAG}" ./app
+          docker push "${REPO_URI}:${IMAGE_TAG}"
+
+      - name: Deploy messaging
+        run: |
+          aws cloudformation package --template-file infra/messaging.yaml \
+            --s3-bucket "$ARTIFACT_BUCKET" --output-template-file messaging-packaged.yaml
+          aws cloudformation deploy --no-fail-on-empty-changeset \
+            --template-file messaging-packaged.yaml --stack-name "${PREFIX}-messaging" \
+            --parameter-overrides Environment="$APP_ENV" --capabilities CAPABILITY_IAM
+
+      - name: Deploy network
+        run: |
+          aws cloudformation deploy --no-fail-on-empty-changeset \
+            --template-file infra/network.yaml --stack-name "${PREFIX}-network"
+
+      - name: Deploy ECS service with the new image tag
+        run: |
+          out() { aws cloudformation describe-stacks --stack-name "$1" \
+            --query "Stacks[0].Outputs[?OutputKey=='$2'].OutputValue | [0]" --output text; }
+          aws cloudformation deploy --no-fail-on-empty-changeset \
+            --template-file infra/app.yaml --stack-name "${PREFIX}-app" \
+            --capabilities CAPABILITY_IAM \
+            --parameter-overrides \
+              VpcId="$(out ${PREFIX}-network VpcId)" \
+              PublicSubnetIds="$(out ${PREFIX}-network PublicSubnetIds)" \
+              PrivateSubnetIds="$(out ${PREFIX}-network PrivateSubnetIds)" \
+              AlbSecurityGroupId="$(out ${PREFIX}-network AlbSecurityGroupId)" \
+              TaskSecurityGroupId="$(out ${PREFIX}-network TaskSecurityGroupId)" \
+              RepositoryArn="$REPO_ARN" \
+              RepositoryUri="$REPO_URI" \
+              TopicArn="$(out ${PREFIX}-messaging TopicArn)" \
+              ImageTag="$IMAGE_TAG" \
+              DesiredCount=2
+          echo "APP_URL=$(out ${PREFIX}-app ApplicationUrl)" >> "$GITHUB_ENV"
+
+      - name: Smoke test
+        run: |
+          for i in $(seq 1 12); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' "$APP_URL/health" || true)
+            echo "attempt $i: HTTP $code"
+            [ "$code" = 200 ] && exit 0
+            sleep 10
+          done
+          echo "Smoke test failed"; exit 1
+
+      - name: Evidence (task definition revision and image tag)
+        run: |
+          SVC=$(aws ecs describe-services --cluster "$(aws cloudformation describe-stacks --stack-name ${PREFIX}-app --query "Stacks[0].Outputs[?OutputKey=='ClusterName'].OutputValue|[0]" --output text)" \
+            --services "$(aws cloudformation describe-stacks --stack-name ${PREFIX}-app --query "Stacks[0].Outputs[?OutputKey=='ServiceName'].OutputValue|[0]" --output text)" \
+            --query 'services[0].taskDefinition' --output text)
+          IMG=$(aws ecs describe-task-definition --task-definition "$SVC" \
+            --query 'taskDefinition.containerDefinitions[0].image' --output text)
+          {
+            echo "### Deployment evidence"
+            echo "- Commit: \`$GITHUB_SHA\`"
+            echo "- Task definition: \`$SVC\`"
+            echo "- Image: \`$IMG\`"
+            echo "- URL: $APP_URL"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          [ "${IMG##*:}" = "$GITHUB_SHA" ] || { echo "Image tag is not the commit SHA"; exit 1; }
