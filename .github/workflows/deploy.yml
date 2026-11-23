@@ -33,7 +33,7 @@ jobs:
       - name: Lint CloudFormation templates
         run: |
           .venv/bin/pip install cfn-lint
-          .venv/bin/cfn-lint --ignore-checks W3002 infra/*.yaml
+          .venv/bin/cfn-lint infra/*.yaml --ignore-checks W3002
 
       # ---- OIDC: no stored access keys ----
       - uses: aws-actions/configure-aws-credentials@v6   # pin to a SHA in real projects
