@@ -1,15 +1,51 @@
 import json
 import logging
 import os
+import time
 from datetime import datetime, timezone
 
 import boto3
+from aws_xray_sdk.core import patch_all
 from botocore.exceptions import ClientError
+
+# Instrument boto3 so every DynamoDB call becomes a subsegment in the trace.
+patch_all()
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
+STAGE = os.environ.get("STAGE", "dev")
+NAMESPACE = "CourseProject/Orders"
+
 table = boto3.resource("dynamodb").Table(os.environ["TABLE_NAME"])
+
+
+def log(level, event, **fields):
+    # One JSON object per line: Logs Insights discovers the fields automatically.
+    print(json.dumps({"level": level, "event": event, **fields}))
+
+
+def emit_metrics(processed, duplicates, failed):
+    # Embedded Metric Format: CloudWatch turns this log line into custom metrics.
+    # IDs stay in the logs; the only dimension is Stage.
+    print(json.dumps({
+        "_aws": {
+            "Timestamp": int(time.time() * 1000),
+            "CloudWatchMetrics": [{
+                "Namespace": NAMESPACE,
+                "Dimensions": [["Stage"]],
+                "Metrics": [
+                    {"Name": "OrdersProcessed", "Unit": "Count"},
+                    {"Name": "OrdersDuplicate", "Unit": "Count"},
+                    {"Name": "OrdersFailed", "Unit": "Count"},
+                ],
+            }],
+        },
+        "Stage": STAGE,
+        "OrdersProcessed": processed,
+        "OrdersDuplicate": duplicates,
+        "OrdersFailed": failed,
+    }))
 
 
 def process_order(body):
@@ -45,31 +81,37 @@ def process_order(body):
             },
             ConditionExpression="attribute_not_exists(orderId)",
         )
-        logger.info(json.dumps({
-            "event": "order_processed",
-            "orderId": order_id,
-        }))
+        log("INFO", "order_processed", orderId=order_id)
+        return "processed"
     except ClientError as error:
         if error.response["Error"]["Code"] != "ConditionalCheckFailedException":
             raise
 
-        logger.info(json.dumps({
-            "event": "duplicate_skipped",
-            "orderId": order_id,
-        }))
+        log("INFO", "duplicate_skipped", orderId=order_id)
+        return "duplicate"
 
 
 def handler(event, context):
     failures = []
+    processed = duplicates = 0
 
     for record in event["Records"]:
         try:
-            process_order(record["body"])
-        except Exception:
-            logger.exception(
-                "Order processing failed: messageId=%s",
-                record["messageId"],
+            if process_order(record["body"]) == "duplicate":
+                duplicates += 1
+            else:
+                processed += 1
+        except Exception as error:
+            # Handled failure: the Lambda Errors metric stays at 0, so we
+            # publish our own OrdersFailed metric and log the details.
+            log(
+                "ERROR",
+                "order_failed",
+                messageId=record["messageId"],
+                errorType=type(error).__name__,
+                error=str(error)[:200],
             )
             failures.append({"itemIdentifier": record["messageId"]})
 
+    emit_metrics(processed, duplicates, len(failures))
     return {"batchItemFailures": failures}

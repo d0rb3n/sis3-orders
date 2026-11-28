@@ -1,0 +1,205 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: SIS3 Orders - alarms, dashboard and saved Logs Insights queries (Practice 8)
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, defence, prod]
+  AlertEmail:
+    Type: String
+    Description: Address that receives alarm notifications (confirm the SNS subscription email!)
+  LoadBalancerFullName:
+    Type: String
+    Description: Output LoadBalancerFullName of the app stack
+  QueueName:
+    Type: String
+  DeadLetterQueueName:
+    Type: String
+  FunctionName:
+    Type: String
+  ConsumerLogGroupName:
+    Type: String
+
+Resources:
+  AlertsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: SIS3 Orders alarms
+
+  AlertsSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref AlertsTopic
+      Protocol: email
+      Endpoint: !Ref AlertEmail
+
+  # Symptom alarm 1: a message failed every retry and needs a human.
+  DeadLetterQueueAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'sis3-${Environment}-dlq-not-empty'
+      AlarmDescription: A message reached the dead-letter queue. Check the order_failed log events (saved query in Logs Insights) and redrive or fix the message.
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !Ref DeadLetterQueueName
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertsTopic
+      OKActions:
+        - !Ref AlertsTopic
+
+  # Symptom alarm 2: users get errors. A rate, not a count (metric math).
+  Alb5xxRateAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'sis3-${Environment}-alb-5xx-rate'
+      AlarmDescription: More than 1 percent of requests returned 5xx for 3 of 5 minutes. Check the ECS service events and the application log group.
+      Metrics:
+        - Id: rate
+          Label: 5xx rate (%)
+          Expression: IF(requests > 0, errors / requests * 100, 0)
+          ReturnData: true
+        - Id: errors
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/ApplicationELB
+              MetricName: HTTPCode_Target_5XX_Count
+              Dimensions:
+                - Name: LoadBalancer
+                  Value: !Ref LoadBalancerFullName
+            Period: 60
+            Stat: Sum
+        - Id: requests
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/ApplicationELB
+              MetricName: RequestCount
+              Dimensions:
+                - Name: LoadBalancer
+                  Value: !Ref LoadBalancerFullName
+            Period: 60
+            Stat: Sum
+      EvaluationPeriods: 5
+      DatapointsToAlarm: 3
+      Threshold: 1
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertsTopic
+      OKActions:
+        - !Ref AlertsTopic
+
+  ErrorsByTypeQuery:
+    Type: AWS::Logs::QueryDefinition
+    Properties:
+      Name: !Sub 'sis3-${Environment}/orders-errors-by-type'
+      LogGroupNames:
+        - !Ref ConsumerLogGroupName
+      QueryString: |
+        fields @timestamp, event, errorType
+        | filter event = "order_failed"
+        | stats count(*) as n by errorType
+        | sort n desc
+        | limit 20
+
+  FailedMessagesQuery:
+    Type: AWS::Logs::QueryDefinition
+    Properties:
+      Name: !Sub 'sis3-${Environment}/orders-failed-messages'
+      LogGroupNames:
+        - !Ref ConsumerLogGroupName
+      QueryString: |
+        fields @timestamp, messageId, errorType, error
+        | filter event = "order_failed"
+        | sort @timestamp desc
+        | limit 50
+
+  Dashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub 'sis3-${Environment}-orders'
+      DashboardBody: !Sub |
+        {
+          "start": "-PT3H",
+          "widgets": [
+            {
+              "type": "alarm", "x": 0, "y": 0, "width": 24, "height": 3,
+              "properties": {
+                "title": "Alarm status",
+                "alarms": [
+                  "${DeadLetterQueueAlarm.Arn}",
+                  "${Alb5xxRateAlarm.Arn}"
+                ]
+              }
+            },
+            {
+              "type": "metric", "x": 0, "y": 3, "width": 12, "height": 6,
+              "properties": {
+                "title": "Traffic: requests per minute",
+                "region": "${AWS::Region}", "view": "timeSeries", "stat": "Sum", "period": 60,
+                "metrics": [
+                  ["AWS/ApplicationELB", "RequestCount", "LoadBalancer", "${LoadBalancerFullName}", {"label": "ALB requests"}],
+                  ["AWS/Lambda", "Invocations", "FunctionName", "${FunctionName}", {"label": "Consumer invocations"}]
+                ]
+              }
+            },
+            {
+              "type": "metric", "x": 12, "y": 3, "width": 12, "height": 6,
+              "properties": {
+                "title": "Errors: 5xx rate (%) and failed orders",
+                "region": "${AWS::Region}", "view": "timeSeries", "period": 60,
+                "metrics": [
+                  [{"expression": "IF(requests > 0, errors / requests * 100, 0)", "label": "ALB 5xx rate (%)", "id": "rate"}],
+                  ["AWS/ApplicationELB", "HTTPCode_Target_5XX_Count", "LoadBalancer", "${LoadBalancerFullName}", {"id": "errors", "visible": false, "stat": "Sum"}],
+                  ["AWS/ApplicationELB", "RequestCount", "LoadBalancer", "${LoadBalancerFullName}", {"id": "requests", "visible": false, "stat": "Sum"}],
+                  ["CourseProject/Orders", "OrdersFailed", "Stage", "${Environment}", {"label": "Orders failed (custom)", "stat": "Sum", "yAxis": "right"}]
+                ],
+                "annotations": {"horizontal": [{"label": "5xx alarm threshold (1%)", "value": 1}]}
+              }
+            },
+            {
+              "type": "metric", "x": 0, "y": 9, "width": 12, "height": 6,
+              "properties": {
+                "title": "Latency: ALB p50 / p95 / p99 and consumer p95",
+                "region": "${AWS::Region}", "view": "timeSeries", "period": 60,
+                "metrics": [
+                  ["AWS/ApplicationELB", "TargetResponseTime", "LoadBalancer", "${LoadBalancerFullName}", {"stat": "p50", "label": "ALB p50"}],
+                  ["...", {"stat": "p95", "label": "ALB p95"}],
+                  ["...", {"stat": "p99", "label": "ALB p99"}],
+                  ["AWS/Lambda", "Duration", "FunctionName", "${FunctionName}", {"stat": "p95", "label": "Consumer p95 (ms)", "yAxis": "right"}]
+                ]
+              }
+            },
+            {
+              "type": "metric", "x": 12, "y": 9, "width": 12, "height": 6,
+              "properties": {
+                "title": "Saturation: queue backlog, DLQ depth, throttles",
+                "region": "${AWS::Region}", "view": "timeSeries", "period": 60,
+                "metrics": [
+                  ["AWS/SQS", "ApproximateAgeOfOldestMessage", "QueueName", "${QueueName}", {"stat": "Maximum", "label": "Oldest message age (s)"}],
+                  ["AWS/SQS", "ApproximateNumberOfMessagesVisible", "QueueName", "${DeadLetterQueueName}", {"stat": "Maximum", "label": "DLQ depth", "yAxis": "right"}],
+                  ["AWS/Lambda", "Throttles", "FunctionName", "${FunctionName}", {"stat": "Sum", "label": "Consumer throttles", "yAxis": "right"}]
+                ]
+              }
+            }
+          ]
+        }
+
+Outputs:
+  AlertsTopicArn:
+    Value: !Ref AlertsTopic
+  DashboardName:
+    Value: !Sub 'sis3-${Environment}-orders'
+  DeadLetterQueueAlarmName:
+    Value: !Ref DeadLetterQueueAlarm

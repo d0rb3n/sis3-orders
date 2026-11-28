@@ -107,6 +107,11 @@ Resources:
                   - logs:CreateLogStream
                   - logs:PutLogEvents
                 Resource: !GetAtt ConsumerLogGroup.Arn
+              - Effect: Allow
+                Action:
+                  - xray:PutTraceSegments
+                  - xray:PutTelemetryRecords
+                Resource: '*'
 
   ConsumerFunction:
     Type: AWS::Lambda::Function
@@ -117,9 +122,12 @@ Resources:
       Role: !GetAtt ConsumerRole.Arn
       Timeout: 30
       MemorySize: 128
+      TracingConfig:
+        Mode: Active
       Environment:
         Variables:
           TABLE_NAME: !Ref OrdersTable
+          STAGE: !Ref Environment
       LoggingConfig:
         LogGroup: !Ref ConsumerLogGroup
 
@@ -138,8 +146,12 @@ Outputs:
     Value: !Ref OrdersTopic
   QueueUrl:
     Value: !Ref OrdersQueue
+  QueueName:
+    Value: !GetAtt OrdersQueue.QueueName
   DeadLetterQueueUrl:
     Value: !Ref DeadLetterQueue
+  DeadLetterQueueName:
+    Value: !GetAtt DeadLetterQueue.QueueName
   TableName:
     Value: !Ref OrdersTable
   ConsumerFunctionName:

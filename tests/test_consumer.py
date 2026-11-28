@@ -1,7 +1,9 @@
 import importlib.util
+import io
 import json
 import os
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -79,6 +81,36 @@ class ConsumerTests(unittest.TestCase):
         self.assertEqual(result, {
             "batchItemFailures": [{"itemIdentifier": "m3"}],
         })
+
+    def run_and_capture(self, event):
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            result = consumer.handler(event, None)
+        lines = [json.loads(line) for line in buffer.getvalue().splitlines()]
+        return result, lines
+
+    def test_emits_embedded_metric_with_one_dimension(self):
+        result, lines = self.run_and_capture({
+            "Records": [record("good"), record("bad", quantity=0)],
+        })
+
+        metric_line = next(line for line in lines if "_aws" in line)
+        definition = metric_line["_aws"]["CloudWatchMetrics"][0]
+        self.assertEqual(definition["Namespace"], "CourseProject/Orders")
+        self.assertEqual(definition["Dimensions"], [["Stage"]])
+        self.assertEqual(metric_line["OrdersProcessed"], 1)
+        self.assertEqual(metric_line["OrdersFailed"], 1)
+        self.assertNotIn("orderId", metric_line)
+
+    def test_failure_is_logged_as_structured_json(self):
+        result, lines = self.run_and_capture({
+            "Records": [record("bad", quantity=0)],
+        })
+
+        failed = next(line for line in lines if line.get("event") == "order_failed")
+        self.assertEqual(failed["level"], "ERROR")
+        self.assertEqual(failed["errorType"], "ValueError")
+        self.assertEqual(failed["messageId"], "bad")
 
 
 if __name__ == "__main__":

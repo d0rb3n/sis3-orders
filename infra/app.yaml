@@ -192,6 +192,8 @@ Outputs:
     Value: !GetAtt Service.Name
   TargetGroupArn:
     Value: !Ref TargetGroup
+  LoadBalancerFullName:
+    Value: !GetAtt LoadBalancer.LoadBalancerFullName
   AppLogGroupName:
     Value: !Ref AppLogGroup
   ExecutionRoleArn:

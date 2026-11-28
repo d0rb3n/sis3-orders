@@ -18,7 +18,7 @@
       "Effect": "Allow",
       "Action": [
         "ec2:*", "elasticloadbalancing:*", "ecs:*", "ecr:*", "logs:*",
-        "sns:*", "sqs:*", "lambda:*", "dynamodb:*", "s3:*"
+        "sns:*", "sqs:*", "lambda:*", "dynamodb:*", "s3:*", "cloudwatch:*"
       ],
       "Resource": "*",
       "Condition": { "StringEquals": { "aws:RequestedRegion": "<REGION>" } }

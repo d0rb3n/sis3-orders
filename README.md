@@ -99,3 +99,60 @@ For each environment:
 7. Verify that NAT Gateways, ALBs and ECS tasks have been removed.
 DynamoDB tables are retained by the template.
 Artifact buckets must be emptied before stack deletion.
+
+## Observability (Practice 8)
+
+Everything below is deployed by the same GitHub Actions pipeline as the application
+(`infra/observability.yaml`, stack `<prefix>-observability`). Region: eu-north-1.
+
+### Custom metric
+The consumer Lambda prints one Embedded Metric Format (EMF) line per batch.
+Namespace `CourseProject/Orders`, one dimension (`Stage`), metrics `OrdersProcessed`,
+`OrdersDuplicate`, `OrdersFailed` (unit Count). Order IDs stay in the logs, never in dimensions.
+`OrdersFailed` exists because the handler catches errors, so the Lambda `Errors` metric stays at 0.
+
+### Structured logs and saved Logs Insights queries
+The consumer writes one JSON object per line (`level`, `event`, `orderId`, `messageId`, `errorType`).
+Saved queries (created by the stack, Logs Insights > Saved queries):
+
+`sis3-dev/orders-errors-by-type`
+```
+fields @timestamp, event, errorType
+| filter event = "order_failed"
+| stats count(*) as n by errorType
+| sort n desc
+| limit 20
+```
+
+`sis3-dev/orders-failed-messages`
+```
+fields @timestamp, messageId, errorType, error
+| filter event = "order_failed"
+| sort @timestamp desc
+| limit 50
+```
+
+### Alarms (SNS email, subscription confirmed)
+| Alarm | Symptom | Rule |
+|---|---|---|
+| `sis3-dev-dlq-not-empty` | A message failed every retry | DLQ `ApproximateNumberOfMessagesVisible` > 0, 1 of 1 minute, missing data = not breaching |
+| `sis3-dev-alb-5xx-rate` | Users get errors | ALB 5xx / requests x 100 > 1 for 3 of 5 minutes (metric math) |
+
+### Dashboard
+`sis3-dev-orders`: alarm status on top, then traffic, errors, latency (p50/p95/p99) and saturation.
+It is defined in `infra/observability.yaml`; the exported JSON is `observability/dashboard.json`.
+
+### Tracing
+Active tracing is on for the consumer Lambda and DynamoDB calls are instrumented with the
+AWS X-Ray SDK (`patch_all`). Trace map: Lambda service, Lambda function, DynamoDB table.
+The X-Ray SDK is in maintenance mode since Feb 2026 (support ends Feb 2027); it was chosen because the
+X-Ray service and Active tracing are fully supported and it needs no extra layer. New code should move to
+OpenTelemetry. The ALB and the ECS service are not instrumented, and the default sampling rule is used
+(no custom 100 % rule was created).
+
+### Cost
+Monthly cost budget with alerts at 50 % and 100 % of the amount (AWS Budgets, email).
+
+### Cleanup
+Both log groups have 7-day retention (declared in the templates). The dashboard, alarms and queries are
+deleted together with the stacks.

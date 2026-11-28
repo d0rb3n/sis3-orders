@@ -27,7 +27,7 @@ jobs:
       - name: Unit tests
         run: |
           python3 -m venv .venv
-          .venv/bin/pip install -r app/requirements.txt
+          .venv/bin/pip install -r app/requirements.txt -r consumer/requirements.txt
           .venv/bin/python -m unittest discover -s tests -v
 
       - name: Lint CloudFormation templates
@@ -45,6 +45,7 @@ jobs:
         run: |
           echo "PREFIX=${{ vars.STACK_PREFIX }}" >> "$GITHUB_ENV"
           echo "APP_ENV=${{ vars.APP_ENV }}" >> "$GITHUB_ENV"
+          echo "ALERT_EMAIL=${{ vars.ALERT_EMAIL }}" >> "$GITHUB_ENV"
           echo "IMAGE_TAG=${GITHUB_SHA}" >> "$GITHUB_ENV"
 
       - name: Artifacts bucket and ECR
@@ -79,6 +80,10 @@ jobs:
 
       - name: Deploy messaging
         run: |
+          # Bundle the X-Ray SDK next to the handler (built for the Lambda runtime: Python 3.13, x86_64)
+          pip install --no-deps --only-binary=:all: --platform manylinux2014_x86_64 \
+            --python-version 3.13 --implementation cp \
+            -r consumer/requirements.txt --target consumer/
           aws cloudformation package --template-file infra/messaging.yaml \
             --s3-bucket "$ARTIFACT_BUCKET" --output-template-file messaging-packaged.yaml
           aws cloudformation deploy --no-fail-on-empty-changeset \
@@ -109,6 +114,22 @@ jobs:
               ImageTag="$IMAGE_TAG" \
               DesiredCount=2
           echo "APP_URL=$(out ${PREFIX}-app ApplicationUrl)" >> "$GITHUB_ENV"
+
+      - name: Deploy observability (alarms, dashboard, saved queries)
+        run: |
+          [ -n "$ALERT_EMAIL" ] || { echo "Set the ALERT_EMAIL variable in the production environment"; exit 1; }
+          out() { aws cloudformation describe-stacks --stack-name "$1" \
+            --query "Stacks[0].Outputs[?OutputKey=='$2'].OutputValue | [0]" --output text; }
+          aws cloudformation deploy --no-fail-on-empty-changeset \
+            --template-file infra/observability.yaml --stack-name "${PREFIX}-observability" \
+            --parameter-overrides \
+              Environment="$APP_ENV" \
+              AlertEmail="$ALERT_EMAIL" \
+              LoadBalancerFullName="$(out ${PREFIX}-app LoadBalancerFullName)" \
+              QueueName="$(out ${PREFIX}-messaging QueueName)" \
+              DeadLetterQueueName="$(out ${PREFIX}-messaging DeadLetterQueueName)" \
+              FunctionName="$(out ${PREFIX}-messaging ConsumerFunctionName)" \
+              ConsumerLogGroupName="$(out ${PREFIX}-messaging ConsumerLogGroupName)"
 
       - name: Smoke test
         run: |
