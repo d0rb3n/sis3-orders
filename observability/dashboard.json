@@ -1,0 +1,213 @@
+{
+    "start": "-PT3H",
+    "widgets": [
+        {
+            "type": "alarm",
+            "x": 0,
+            "y": 0,
+            "width": 24,
+            "height": 3,
+            "properties": {
+                "title": "Alarm status",
+                "alarms": [
+                    "arn:aws:cloudwatch:eu-north-1:792207721795:alarm:sis3-dev-dlq-not-empty",
+                    "arn:aws:cloudwatch:eu-north-1:792207721795:alarm:sis3-dev-alb-5xx-rate"
+                ]
+            }
+        },
+        {
+            "type": "metric",
+            "x": 0,
+            "y": 3,
+            "width": 12,
+            "height": 6,
+            "properties": {
+                "title": "Traffic: requests per minute",
+                "region": "eu-north-1",
+                "view": "timeSeries",
+                "stat": "Sum",
+                "period": 60,
+                "metrics": [
+                    [
+                        "AWS/ApplicationELB",
+                        "RequestCount",
+                        "LoadBalancer",
+                        "app/sis3-d-LoadB-Ctpy5UucbSAr/7cafa8cbbc4a26cc",
+                        {
+                            "label": "ALB requests"
+                        }
+                    ],
+                    [
+                        "AWS/Lambda",
+                        "Invocations",
+                        "FunctionName",
+                        "sis3-dev-messaging-ConsumerFunction-1cfBxTvu8CPy",
+                        {
+                            "label": "Consumer invocations"
+                        }
+                    ]
+                ]
+            }
+        },
+        {
+            "type": "metric",
+            "x": 12,
+            "y": 3,
+            "width": 12,
+            "height": 6,
+            "properties": {
+                "title": "Errors: 5xx rate (%) and failed orders",
+                "region": "eu-north-1",
+                "view": "timeSeries",
+                "period": 60,
+                "metrics": [
+                    [
+                        {
+                            "expression": "IF(requests > 0, errors / requests * 100, 0)",
+                            "label": "ALB 5xx rate (%)",
+                            "id": "rate"
+                        }
+                    ],
+                    [
+                        "AWS/ApplicationELB",
+                        "HTTPCode_Target_5XX_Count",
+                        "LoadBalancer",
+                        "app/sis3-d-LoadB-Ctpy5UucbSAr/7cafa8cbbc4a26cc",
+                        {
+                            "id": "errors",
+                            "visible": false,
+                            "stat": "Sum"
+                        }
+                    ],
+                    [
+                        "AWS/ApplicationELB",
+                        "RequestCount",
+                        "LoadBalancer",
+                        "app/sis3-d-LoadB-Ctpy5UucbSAr/7cafa8cbbc4a26cc",
+                        {
+                            "id": "requests",
+                            "visible": false,
+                            "stat": "Sum"
+                        }
+                    ],
+                    [
+                        "CourseProject/Orders",
+                        "OrdersFailed",
+                        "Stage",
+                        "dev",
+                        {
+                            "label": "Orders failed (custom)",
+                            "stat": "Sum",
+                            "yAxis": "right"
+                        }
+                    ]
+                ],
+                "annotations": {
+                    "horizontal": [
+                        {
+                            "label": "5xx alarm threshold (1%)",
+                            "value": 1
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "type": "metric",
+            "x": 0,
+            "y": 9,
+            "width": 12,
+            "height": 6,
+            "properties": {
+                "title": "Latency: ALB p50 / p95 / p99 and consumer p95",
+                "region": "eu-north-1",
+                "view": "timeSeries",
+                "period": 60,
+                "metrics": [
+                    [
+                        "AWS/ApplicationELB",
+                        "TargetResponseTime",
+                        "LoadBalancer",
+                        "app/sis3-d-LoadB-Ctpy5UucbSAr/7cafa8cbbc4a26cc",
+                        {
+                            "stat": "p50",
+                            "label": "ALB p50"
+                        }
+                    ],
+                    [
+                        "...",
+                        {
+                            "stat": "p95",
+                            "label": "ALB p95"
+                        }
+                    ],
+                    [
+                        "...",
+                        {
+                            "stat": "p99",
+                            "label": "ALB p99"
+                        }
+                    ],
+                    [
+                        "AWS/Lambda",
+                        "Duration",
+                        "FunctionName",
+                        "sis3-dev-messaging-ConsumerFunction-1cfBxTvu8CPy",
+                        {
+                            "stat": "p95",
+                            "label": "Consumer p95 (ms)",
+                            "yAxis": "right"
+                        }
+                    ]
+                ]
+            }
+        },
+        {
+            "type": "metric",
+            "x": 12,
+            "y": 9,
+            "width": 12,
+            "height": 6,
+            "properties": {
+                "title": "Saturation: queue backlog, DLQ depth, throttles",
+                "region": "eu-north-1",
+                "view": "timeSeries",
+                "period": 60,
+                "metrics": [
+                    [
+                        "AWS/SQS",
+                        "ApproximateAgeOfOldestMessage",
+                        "QueueName",
+                        "sis3-dev-messaging-OrdersQueue-GH67YJSqBN2u",
+                        {
+                            "stat": "Maximum",
+                            "label": "Oldest message age (s)"
+                        }
+                    ],
+                    [
+                        "AWS/SQS",
+                        "ApproximateNumberOfMessagesVisible",
+                        "QueueName",
+                        "sis3-dev-messaging-DeadLetterQueue-i5EgScSbgxpo",
+                        {
+                            "stat": "Maximum",
+                            "label": "DLQ depth",
+                            "yAxis": "right"
+                        }
+                    ],
+                    [
+                        "AWS/Lambda",
+                        "Throttles",
+                        "FunctionName",
+                        "sis3-dev-messaging-ConsumerFunction-1cfBxTvu8CPy",
+                        {
+                            "stat": "Sum",
+                            "label": "Consumer throttles",
+                            "yAxis": "right"
+                        }
+                    ]
+                ]
+            }
+        }
+    ]
+}
